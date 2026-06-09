@@ -86,9 +86,9 @@ def load_historical_data():
 # 3. 当日データスクレイピング (出馬表)
 # ==========================================
 def get_today_race_ids(target_date_str=None):
-    """
-    race.netkeiba.com から対象日のレースIDリストを取得
-    """
+    
+    # netkeibaから対象日のレースIDリストを取得
+    
     if target_date_str is None:
         target_date_str = datetime.datetime.now().strftime("%Y%m%d")
     
@@ -105,7 +105,6 @@ def get_today_race_ids(target_date_str=None):
         
         race_ids = []
         # レースIDを含むリンクを探す
-        # <a href="../race/shutuba.html?race_id=202401010101"> など
         links = soup.find_all("a", href=re.compile(r"race_id=\d{12}"))
         
         for link in links:
@@ -154,12 +153,15 @@ def get_shutuba_table(race_id):
             return None
         intro_text = data_intro.get_text(strip=True)
         
-        # 場所・日付 (簡易処理)
+        # 場所・日付
         place_code = race_id[4:6]
-        place_map = {"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"}
+        place_map = {"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"} 
+        # 府中、中山、新潟の順番なんか違和感ある
+        
+        # 海外レースが該当するはず
         place = place_map.get(place_code, "その他")
         
-        # 日付は今日の日付 (実行日)
+        # 日付
         race_date = pd.to_datetime(datetime.datetime.now().date())
         
         surface = "芝" if "芝" in intro_text else "ダ" if "ダ" in intro_text else "障害"
@@ -180,6 +182,7 @@ def get_shutuba_table(race_id):
         search_text = race_name + intro_full
         
         race_class = "OP"
+        # netkeibaがローマ数字の1の代わりに大文字のI使ってるせいで最初反応しなかった。どっちでも対応できるよう修正
         mapping = {"GI":"G1", "GII":"G2", "GIII":"G3"}
         for c in ["G1","GI","G2","GII","G3","GIII","L","OP","3勝","2勝","1勝","未勝利","新馬"]:
             if c in search_text:
@@ -208,7 +211,6 @@ def get_shutuba_table(race_id):
                         h_name = a_tag.get_text(strip=True)
                         h_url = a_tag.get("href")
                         if h_url:
-                            # 2025/1/31: URL形式変更への対応などが必要な場合はここで調整
                             match = re.search(r'horse/(\d+)', h_url)
                             if match:
                                 horse_id = match.group(1)
@@ -250,7 +252,7 @@ def get_shutuba_table(race_id):
                         try: weight_diff = int(match.group(2))
                         except: pass
                 
-                # 数値変換 (エラー時はnan)
+                # 数値変換 (エラー時はNaN)
                 try: bracket = int(bracket_val)
                 except: bracket = np.nan
                 
@@ -328,21 +330,23 @@ def preprocess_wrapper(history_df, today_df):
     combined_df = pd.concat([history_df, today_df], ignore_index=True)
     combined_df = combined_df.sort_values(["race_date", "race_id"])
     
-    # 特徴量エンジニアリング実行 (既存ロジックを流用)
-    # ここで shift(1) 系の特徴量が今日のデータに対しては過去(History)から生成される
+    # 特徴量エンジニアリング実行
     combined_df = feature_engineering(combined_df)
     
     return combined_df
 
 
 def feature_engineering(df):
-    # keiba_generate_plot_v3.py のロジックを再実装/コピー
     
     # ターゲット予備計算
     df["is_ren"] = (df["rank"] <= 2).astype(int)
     df["is_win"] = (df["rank"] == 1).astype(int)
     
-    # Class Weight
+    # クラスごとの重み付け
+    # 現在は簡易的にクラス分類だけで数値化
+    # 将来的には同じクラスでもレースレベルが大きく異なるケースがあるため、過去のタイムや出走馬のレベルなども考慮して重み付けすることを検討
+    # 牝限と牡馬混合が同じウエイトなのもおかしいので後々修正する予定
+    
     def get_base_race_weight(cls_str):
         if pd.isna(cls_str): return 45
         if "G1" in cls_str or "GI" in cls_str: return 100
@@ -367,7 +371,7 @@ def feature_engineering(df):
 
     # Expanding Mean
     def expanding_mean(df, group_cols, target_col):
-        # shift(1) しているので、今日のデータには「前走までの平均」が入る。OK。
+        # shift(1) しているので、今日のデータには前走までの平均が入る
         return df.groupby(group_cols, observed=False)[target_col].transform(lambda x: x.shift(1).expanding().mean()).fillna(0)
     
     df["jockey_win_rate"] = expanding_mean(df, ["jockey_id"], "is_win")
@@ -463,11 +467,6 @@ if __name__ == "__main__":
         print("レースIDが指定されていません。TARGET_RACE_IDSを設定するか、引数を指定してください。")
         exit()
     
-    # ▼▼▼ 以下は既存の日付検索ロジック（今回はコメントアウトまたは削除） ▼▼▼
-    # target_date_str = datetime.datetime.now().strftime("%Y%m%d")
-    # print(f"Fetching all races for date: {target_date_str}")
-    # race_ids = get_today_race_ids(target_date_str)
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
     
     if not race_ids:
         print("予測対象のレースが見つかりませんでした。終了します。")
