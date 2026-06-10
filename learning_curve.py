@@ -11,7 +11,7 @@ import os
 # ==========================================
 # 1. Config & Data Loading
 # ==========================================
-DB_NAME = "keiba_data_main_2.db"
+DB_NAME = "/Users/ryota/programs/keiba/keiba_data_main_2.db"
 # Use a font that supports Japanese if available, otherwise default
 # On Windows, 'Meiryo' or 'MS Gothic' is standard for Japanese
 plt.rcParams['font.family'] = 'Meiryo'

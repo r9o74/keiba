@@ -8,13 +8,15 @@ import datetime
 import numpy as np
 from io import StringIO
 from tqdm import tqdm
+import os
 
 # ==========================================
-# 設定項目 (変更なし)
+# 設定項目
 # ==========================================
-START_YEAR = 2026
-END_YEAR = 2026
-DB_NAME = "keiba_data_main_2.db"
+
+# 実行スクリプトの場所（upload内）から見て、親ディレクトリにあるDBを指すように修正
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_NAME = os.path.join(BASE_DIR, "keiba_data_main_2.db")
 
 # is_already_saved, get_race_ids_by_month は変更不要のため省略
 # (元のコードのまま使用してください)
@@ -32,6 +34,27 @@ def is_already_saved(race_id, db_name):
         exists = False
     conn.close()
     return exists
+
+def get_latest_race_date(db_name):
+    """DB内の最新のレース開催日を取得する"""
+    if not os.path.exists(db_name):
+        return None
+    conn = sqlite3.connect(db_name)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='race_results'")
+        if cursor.fetchone() is None:
+            return None
+        cursor.execute("SELECT MAX(race_date) FROM race_results")
+        res = cursor.fetchone()
+        if res and res[0]:
+            # "YYYY-MM-DD" 形式を想定してパース
+            return datetime.datetime.strptime(res[0], "%Y-%m-%d").date()
+    except Exception as e:
+        print(f"最新日付取得エラー: {e}")
+    finally:
+        conn.close()
+    return None
 
 def get_race_ids_by_month(year, month):
     url = f"https://db.netkeiba.com/race/list/{year}{str(month).zfill(2)}/"
@@ -341,11 +364,27 @@ def save_to_db(df, db_name):
     conn.close()
 
 def main_scraping():
-    print(f"=== スクレイピング開始: {START_YEAR}年 〜 {END_YEAR}年 ===")
+    # DBの最新日付を確認し、開始地点を決定
+    latest_date = get_latest_race_date(DB_NAME)
+    now = datetime.datetime.now()
+    
+    if latest_date:
+        start_year, start_month = latest_date.year, latest_date.month
+        print(f"DB内の最新データ日付: {latest_date}。ここから更新分をチェックします。")
+    else:
+        # DBが空の場合のデフォルト開始位置
+        start_year, start_month = 2021, 1
+        print(f"データベースにデータがないため、{start_year}年から開始します。")
+
+    end_year, end_month = now.year, now.month
+    print(f"=== スクレイピング開始: {start_year}年{start_month}月 〜 {end_year}年{end_month}月 ===")
     total_stats = {"success": 0, "error": 0, "skipped": 0}
-    for year in range(START_YEAR, END_YEAR + 1):
-        for month in range(1, 13):
-            if year == datetime.datetime.now().year and month > datetime.datetime.now().month: break
+    
+    for year in range(start_year, end_year + 1):
+        m_start = start_month if year == start_year else 1
+        m_end = end_month if year == end_year else 12
+        
+        for month in range(m_start, m_end + 1):
             race_ids = get_race_ids_by_month(year, month)
             if not race_ids: continue
             pbar = tqdm(race_ids, desc=f"{year}/{month}", unit="race")

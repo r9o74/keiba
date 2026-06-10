@@ -8,7 +8,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
 import os
 
-DB_NAME = "keiba_data_main_2.db"
+DB_NAME = "/Users/ryota/programs/keiba/keiba_data_main_2.db"
 plt.rcParams['font.family'] = 'Meiryo'
 
 def load_historical_data():

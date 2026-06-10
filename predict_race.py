@@ -9,17 +9,21 @@ import datetime
 from sklearn.metrics import roc_auc_score
 import argparse
 import os
+import joblib
 
 # ==========================================
 # 1. 設定
 # ==========================================
-DB_NAME = "keiba_data_main_2.db"
+DB_NAME = "/Users/ryota/programs/keiba/keiba_data_main_2.db"
+MODEL_PATH = "model_lgbm.joblib"
+BEST_PARAMS_PATH = "best_params.joblib"
 
 TARGET_RACE_IDS = [
     "202605010211"
 ]
 
-MODEL_PARAMS = {
+# デフォルトパラメータ（best_params.joblib がなければこれを使用）
+DEFAULT_MODEL_PARAMS = {
     'learning_rate': 0.019783049312554545,
     'num_leaves': 134,
     'max_depth': 5,
@@ -36,6 +40,18 @@ MODEL_PARAMS = {
     'verbosity': -1,
     'importance_type': 'gain'
 }
+
+# learning.py で生成された best_params.joblib があれば読み込む
+if os.path.exists(BEST_PARAMS_PATH):
+    try:
+        best_params_payload = joblib.load(BEST_PARAMS_PATH)
+        MODEL_PARAMS = best_params_payload.get("params", DEFAULT_MODEL_PARAMS)
+        print(f"✓ Optuna 最適パラメータをロード → {BEST_PARAMS_PATH}")
+    except Exception as e:
+        print(f"⚠ best_params.joblib のロードに失敗 ({e}) → デフォルトを使用")
+        MODEL_PARAMS = DEFAULT_MODEL_PARAMS
+else:
+    MODEL_PARAMS = DEFAULT_MODEL_PARAMS
 
 # ==========================================
 # 2. 過去データ読み込み
@@ -86,39 +102,70 @@ def load_historical_data():
 # 3. 当日データスクレイピング (出馬表)
 # ==========================================
 def get_today_race_ids(target_date_str=None):
-    
-    # netkeibaから対象日のレースIDリストを取得
-    
+    """
+    netkeibaから対象日のレース情報を取得。
+    戻り値: {race_id: {"name": str}} の dict
+    ※ race_list_sub.html を使用（race_list.html は JS シェルのみ）
+    """
+
     if target_date_str is None:
         target_date_str = datetime.datetime.now().strftime("%Y%m%d")
-    
-    # race.netkeiba.com のトップ or 日付指定URL
-    # URLパターン: https://race.netkeiba.com/top/race_list.html?kaisai_date=20240131
-    url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={target_date_str}"
-    
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    print(f"Fetching race list from: {url}")
+
+    # race_list.html は Ajax シェルなので、実データが入る _sub を使う
+    url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={target_date_str}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://race.netkeiba.com/",
+    }
+
     try:
-        res = requests.get(url, headers=headers)
-        res.encoding = "EUC-JP"
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = "UTF-8"  # ページ宣言も UTF-8
         soup = BeautifulSoup(res.text, "html.parser")
-        
-        race_ids = []
-        # レースIDを含むリンクを探す
-        links = soup.find_all("a", href=re.compile(r"race_id=\d{12}"))
-        
-        for link in links:
-            href = link.get("href")
-            r_id_match = re.search(r"race_id=(\d{12})", href)
-            if r_id_match:
-                race_ids.append(r_id_match.group(1))
-        
-        race_ids = sorted(list(set(race_ids)))
-        print(f"Found {len(race_ids)} races for {target_date_str}")
-        return race_ids
+
+        race_info = {}
+
+        # dl.RaceList_DataList ごと（＝開催場ごと）に li を処理
+        for li in soup.find_all("li", class_=re.compile(r"RaceList_DataItem")):
+            # race_id を含む最初の <a> を取得（movie リンクは除外）
+            a = li.find("a", href=re.compile(r"race_id=\d{12}"),
+                        class_=lambda c: c != "LinkIconRaceMovie")
+            if not a:
+                continue
+            href = a.get("href", "")
+            m = re.search(r"race_id=(\d{12})", href)
+            if not m:
+                continue
+            rid = m.group(1)
+
+            # レース名: span.ItemTitle に格納されている
+            name_span = li.find("span", class_="ItemTitle")
+            name = name_span.get_text(strip=True) if name_span else ""
+
+            # 取れなければ <a> テキスト全体からレース番号(「11R」等)を除いて使う
+            if not name:
+                full_text = a.get_text(separator=" ", strip=True)
+                name = re.sub(r'^\d+R\s*', '', full_text).strip()
+
+            # 重賞・OP/Listed 判定: Icon_GradeType1/2/3/5 を持つ span があれば True
+            # Icon_GradeType17 = 条件特別（平場扱い）
+            # GRADE_TYPES: 1=G1, 2=G2, 3=G3, 4=JpnI等, 5=OP/L
+            GRADE_TYPES = {"Icon_GradeType1", "Icon_GradeType2", "Icon_GradeType3",
+                           "Icon_GradeType4", "Icon_GradeType5"}
+            grade_span = li.find("span", class_=re.compile(r"Icon_GradeType\d"))
+            is_grade = False
+            if grade_span:
+                span_classes = set(grade_span.get("class", []))
+                is_grade = bool(span_classes & GRADE_TYPES)
+
+            race_info[rid] = {"name": name, "is_grade": is_grade}
+
+        print(f"  {target_date_str}: {len(race_info)} レース取得")
+        return race_info
+
     except Exception as e:
-        print(f"レース一覧取得エラー: {e}")
-        return []
+        print(f"レース一覧取得エラー ({target_date_str}): {e}")
+        return {}
 
 def safe_get_text(element, selector=None, class_=None, default=""):
     """要素からテキストを安全に取得するヘルパー"""
@@ -344,7 +391,7 @@ def feature_engineering(df):
     
     # クラスごとの重み付け
     # 現在は簡易的にクラス分類だけで数値化
-    # 将来的には同じクラスでもレースレベルが大きく異なるケースがあるため、過去のタイムや出走馬のレベルなども考慮して重み付けすることを検討
+    # 同じクラスでもレースレベルが大きく異なるケースがあるため、将来的には過去のタイムや出走馬のレベルなども考慮して重み付けすることを検討
     # 牝限と牡馬混合が同じウエイトなのもおかしいので後々修正する予定
     
     def get_base_race_weight(cls_str):
@@ -442,11 +489,212 @@ def feature_engineering(df):
     return df
 
 # ==========================================
-# 5. メイン処理
+# 5. モデル保存・ロード
+# ==========================================
+
+def save_model(model, use_features, cat_cols, n_train):
+    """モデルと学習メタ情報を joblib で保存する"""
+    db_mtime = os.path.getmtime(DB_NAME) if os.path.exists(DB_NAME) else 0
+    payload = {
+        "model":        model,
+        "use_features": use_features,
+        "cat_cols":     cat_cols,
+        "n_train":      n_train,
+        "trained_at":   datetime.datetime.now().isoformat(timespec="seconds"),
+        "db_mtime":     db_mtime,
+    }
+    joblib.dump(payload, MODEL_PATH)
+    print(f"モデルを保存しました → {MODEL_PATH}  (学習サンプル数: {n_train:,})")
+
+
+def load_model_if_valid():
+    """
+    保存済みモデルをロードして返す。
+    以下の場合は None を返し、呼び出し元で再学習する:
+      - モデルファイルが存在しない
+      - DB がモデル学習後に更新されている
+      - ロードに失敗した
+    """
+    if not os.path.exists(MODEL_PATH):
+        print("保存済みモデルなし → 新規学習します")
+        return None
+
+    try:
+        payload = joblib.load(MODEL_PATH)
+        db_mtime = os.path.getmtime(DB_NAME) if os.path.exists(DB_NAME) else 0
+
+        if db_mtime > payload.get("db_mtime", 0):
+            print("DB が更新されています → 再学習します")
+            return None
+
+        print(f"保存済みモデルをロードしました"
+              f"  (学習日時: {payload['trained_at']}, サンプル数: {payload['n_train']:,})")
+        return payload
+
+    except Exception as e:
+        print(f"モデルロードエラー: {e} → 再学習します")
+        return None
+
+
+# ==========================================
+# 6. インタラクティブ選択
+# ==========================================
+
+PLACE_MAP = {
+    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟",
+    "05": "東京", "06": "中山", "07": "中京", "08": "京都",
+    "09": "阪神", "10": "小倉"
+}
+
+WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def get_upcoming_kaisai_dates(weeks_ahead=3):
+    """今日から数週間先の土日＋今日のうちレースがある日付を返す {date_str: [race_ids]}"""
+    today = datetime.date.today()
+    candidates = []
+
+    # 今日を含め直近1日も確認
+    for delta in range(-1, weeks_ahead * 7 + 1):
+        d = today + datetime.timedelta(days=delta)
+        if d == today or d.weekday() in (5, 6):  # 土=5, 日=6
+            candidates.append(d)
+
+    candidates = sorted(set(candidates))
+    dates_with_races = {}
+
+    print("開催日程を確認中...")
+    for d in candidates:
+        date_str = d.strftime("%Y%m%d")
+        ids = get_today_race_ids(date_str)
+        if ids:
+            dates_with_races[date_str] = ids
+
+    return dates_with_races
+
+
+def parse_races_by_venue(race_ids):
+    """race_idリストを場所ごとに整理して返す {place_code: [race_num_int, ...]}"""
+    venues = {}
+    for rid in race_ids:
+        place_code = rid[4:6]
+        race_num = int(rid[10:12])
+        venues.setdefault(place_code, []).append(race_num)
+    for pc in venues:
+        venues[pc] = sorted(set(venues[pc]))
+    return venues
+
+
+def select_race_interactive(dates_with_races):
+    """対話形式でrace_idを1つ選んで返す"""
+
+    # --- ステップ1: 日付選択 ---
+    date_list = sorted(dates_with_races.keys())
+    print("\n開催日を選択してください:")
+    for i, ds in enumerate(date_list, 1):
+        d = datetime.date(int(ds[:4]), int(ds[4:6]), int(ds[6:8]))
+        wd = WEEKDAY_JP[d.weekday()]
+        print(f"  {i}. {d.strftime('%Y-%m-%d')} ({wd})")
+
+    while True:
+        try:
+            choice = int(input("> ")) - 1
+            if 0 <= choice < len(date_list):
+                selected_date = date_list[choice]
+                break
+        except (ValueError, KeyboardInterrupt):
+            pass
+        print("番号を正しく入力してください。")
+
+    race_ids_for_date = dates_with_races[selected_date]
+    venues = parse_races_by_venue(race_ids_for_date)
+
+    # --- ステップ2: 重賞/平場の選択 ---
+    # is_grade フラグ（Icon_GradeType1/2/3/4/5）で重賞・OP/Listed を判定
+    options = []  # (label, race_id or None, heiba_info or None)
+
+    for pc in sorted(venues.keys()):
+        place_name = PLACE_MAP.get(pc, f"不明({pc})")
+
+        venue_race_ids = sorted(
+            [rid for rid in race_ids_for_date if rid[4:6] == pc],
+            key=lambda r: int(r[10:12])
+        )
+        grade_races = []
+        heiba_nums = []
+
+        for rid in venue_race_ids:
+            r_num = int(rid[10:12])
+            info = race_ids_for_date.get(rid, {})
+            race_name = info.get("name", "")
+
+            # is_grade フラグで重賞・OP/Listed を判定（レース名依存を廃止）
+            if info.get("is_grade", False):
+                grade_races.append((rid, r_num, race_name))
+            else:
+                heiba_nums.append(r_num)
+
+        # 重賞・OP は個別に選択肢として追加
+        for rid, r_num, name in grade_races:
+            options.append((f"{place_name}{r_num}R {name}", rid, None))
+
+        # 平場（重賞以外）をまとめて選択肢に追加
+        if heiba_nums:
+            options.append((f"{place_name} 平場", None, (pc, heiba_nums)))
+
+    print(f"\nレース種別を選択してください ({selected_date[:4]}/{selected_date[4:6]}/{selected_date[6:8]}):")
+    for i, (label, _, _) in enumerate(options, 1):
+        print(f"  {i}. {label}")
+
+    while True:
+        try:
+            choice = int(input("> ")) - 1
+            if 0 <= choice < len(options):
+                _, main_race_id, heiba_info = options[choice]
+                break
+        except (ValueError, KeyboardInterrupt):
+            pass
+        print("番号を正しく入力してください。")
+
+    if main_race_id is not None:
+        return [main_race_id]
+
+    # --- ステップ3: 平場のレース番号選択 ---
+    pc, heiba_nums = heiba_info
+    place_name = PLACE_MAP.get(pc, f"不明({pc})")
+    
+    heiba_list = []
+    for rid in race_ids_for_date.keys():
+        if rid[4:6] == pc:
+            r_num = int(rid[10:12])
+            if r_num in heiba_nums:
+                race_name = race_ids_for_date[rid].get("name", "")
+                heiba_list.append((rid, r_num, race_name))
+    
+    # レース番号順にソート
+    heiba_list.sort(key=lambda x: x[1])
+
+    print(f"\n{place_name}の平場レースを選択してください:")
+    for i, (rid, r_num, name) in enumerate(heiba_list, 1):
+        print(f"  {i}. {r_num}R {name}")
+
+    while True:
+        try:
+            choice = int(input("> ")) - 1
+            if 0 <= choice < len(heiba_list):
+                return [heiba_list[choice][0]]
+        except (ValueError, KeyboardInterrupt):
+            pass
+        print("番号を正しく入力してください。")
+
+
+# ==========================================
+# 6. メイン処理
 # ==========================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict race results.")
     parser.add_argument("--race_id", type=str, help="Specific Valid Race ID to predict")
+    parser.add_argument("--retrain", action="store_true", help="強制的に再学習してモデルを上書き保存する")
     args = parser.parse_args()
 
     # 1. 過去DB読み込み
@@ -455,17 +703,16 @@ if __name__ == "__main__":
         print("過去データがないため終了します。")
         exit()
 
-    # 2. レースID決定 (変更箇所)
-    # コマンドライン引数があれば最優先、なければ設定定数(TARGET_RACE_IDS)を使用
+    # 2. レースID決定
     if args.race_id:
-        print(f"Specifying race ID from arguments: {args.race_id}")
+        print(f"引数で指定されたレースID: {args.race_id}")
         race_ids = [args.race_id]
-    elif TARGET_RACE_IDS:
-        print(f"Using hardcoded race IDs: {TARGET_RACE_IDS}")
-        race_ids = TARGET_RACE_IDS
     else:
-        print("レースIDが指定されていません。TARGET_RACE_IDSを設定するか、引数を指定してください。")
-        exit()
+        dates_with_races = get_upcoming_kaisai_dates()
+        if not dates_with_races:
+            print("直近の開催日程が取得できませんでした。")
+            exit()
+        race_ids = select_race_interactive(dates_with_races)
     
     
     if not race_ids:
@@ -528,24 +775,39 @@ if __name__ == "__main__":
         "place", "surface", "weather", "condition", "race_class", "dist_cat",
         "month_sin", "month_cos"
     ]
-    
+
     cat_cols = ["place", "surface", "weather", "condition", "race_class", "dist_cat"]
+
+    # 5. モデルのロードまたは学習
+    saved = None if args.retrain else load_model_if_valid()
+
+    if saved is not None:
+        # ── 保存済みモデルを再利用 ──
+        full_model   = saved["model"]
+        use_features = saved["use_features"]
+        cat_cols     = saved["cat_cols"]
+    else:
+        # ── 新規学習 ──
+        for c in cat_cols:
+            if c in train_df.columns:
+                train_df[c] = train_df[c].astype("category")
+
+        use_features = [f for f in features if f in train_df.columns]
+        target = (train_df["rank"] == 1).astype(int)
+
+        print("Training model on full history...")
+        full_model = lgb.LGBMClassifier(**MODEL_PARAMS)
+        full_model.fit(
+            train_df[use_features], target,
+            categorical_feature=[c for c in cat_cols if c in use_features]
+        )
+        save_model(full_model, use_features, cat_cols, n_train=len(train_df))
+
+    # predict_df のカテゴリ列を変換
     for c in cat_cols:
-        if c in train_df.columns:
-            train_df[c] = train_df[c].astype("category")
         if c in predict_df.columns:
             predict_df[c] = predict_df[c].astype("category")
 
-    use_features = [f for f in features if f in train_df.columns]
-    target = (train_df["rank"] == 1).astype(int)
-    
-    print("Training model on full history...")
-    full_model = lgb.LGBMClassifier(**MODEL_PARAMS)
-    full_model.fit(
-        train_df[use_features], target,
-        categorical_feature=[c for c in cat_cols if c in use_features]
-    )
-    
     # 6. 予測実行
     print("Predicting races...")
     preds = full_model.predict_proba(predict_df[use_features])[:, 1]

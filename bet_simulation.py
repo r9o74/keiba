@@ -2,11 +2,14 @@ import pandas as pd
 import sqlite3
 import numpy as np
 import lightgbm as lgb
+import joblib
+import os
 
 # ==========================================
 # 設定
 # ==========================================
-DB_NAME = "keiba_data_main_2.db"
+DB_NAME = "/Users/ryota/programs/keiba/keiba_data_main_2.db"
+BEST_PARAMS_PATH = "best_params.joblib"
 TRAIN_END_YEAR = 2024  # 学習に使用する最終年
 TEST_START_YEAR = 2025 # シミュレーションを開始する年
 
@@ -154,7 +157,9 @@ def run_simulation():
 
     # --- 学習 ---
     print("\n[モデル学習中 (LightGBM)]...")
-    params = {
+
+    # best_params.joblib があれば Optuna 最適パラメータを使用、なければデフォルト
+    default_params = {
         'random_state': 42,
         'n_estimators': 1000,
         'learning_rate': 0.05,
@@ -162,7 +167,19 @@ def run_simulation():
         'num_leaves': 31,
         'importance_type': 'gain'
     }
-    
+    if os.path.exists(BEST_PARAMS_PATH):
+        try:
+            payload = joblib.load(BEST_PARAMS_PATH)
+            loaded = payload.get("params", {})
+            # シミュレーション用に固定すべき項目だけ上書き
+            params = {**loaded, 'random_state': 42, 'importance_type': 'gain'}
+            print(f"✓ Optuna 最適パラメータをロード → {BEST_PARAMS_PATH}")
+        except Exception as e:
+            print(f"⚠ best_params.joblib のロードに失敗 ({e}) → デフォルトを使用")
+            params = default_params
+    else:
+        params = default_params
+
     model = lgb.LGBMClassifier(**params)
     model.fit(
         train_df[use_features], 

@@ -7,12 +7,14 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score
 import os
 import optuna
-from optuna.integration import LightGBMPruningCallback
+from optuna_integration import LightGBMPruningCallback
+import joblib
+import datetime
 
 # ==========================================
 # 1. 設定・データ読み込み
 # ==========================================
-DB_NAME = "keiba_data_main_2.db"
+DB_NAME = "/Users/ryota/programs/keiba/keiba_data_main_2.db"
 plt.rcParams['font.family'] = 'Meiryo'
 
 def load_historical_data():
@@ -304,13 +306,20 @@ def run_optimization(df):
 # 4. 最終学習と可視化
 # ==========================================
 def train_final_model(df, best_params, use_features, cat_cols, target):
+    """
+    ベストパラメータで最終学習と可視化を行い、best_params を返す
+    """
     print("\nベストパラメータで最終学習曲線をプロットします...")
-    
+
     # n_estimatorsなどは固定値を上書きする場合あり
     final_params = best_params.copy()
     final_params['n_estimators'] = 2000
     final_params['random_state'] = 42
     final_params['importance_type'] = 'gain'
+    final_params['boosting_type'] = 'gbdt'
+    final_params['objective'] = 'binary'
+    final_params['metric'] = 'auc'
+    final_params['verbosity'] = -1
     
     n_splits = 5
     tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -365,9 +374,20 @@ def train_final_model(df, best_params, use_features, cat_cols, target):
     plt.savefig("feature_importance_v3.png")
     print("保存完了: feature_importance_v3.png")
 
+    return final_params
+
 if __name__ == "__main__":
     df = load_historical_data()
     if not df.empty:
         df = preprocess_data(df)
         best_params, use_features, cat_cols, target, df = run_optimization(df)
-        train_final_model(df, best_params, use_features, cat_cols, target)
+        final_params = train_final_model(df, best_params, use_features, cat_cols, target)
+
+        # ── ハイパーパラメータを joblib で保存 ──
+        payload = {
+            "params": final_params,
+            "optimized_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        joblib.dump(payload, "best_params.joblib")
+        print(f"\n✓ 最適パラメータを保存しました → best_params.joblib")
+        print(f"  パラメータ: {final_params}")
